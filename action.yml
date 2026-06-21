@@ -1,0 +1,281 @@
+name: Abizor Check
+description: Run Abizor Check on one pull request and publish a GitHub Check.
+
+inputs:
+  verification-command:
+    description: Command to verify the pull request inside the caller runner.
+    required: true
+  github-token:
+    description: GitHub token used for PR/check reads and Check publication.
+    required: true
+  abizor-version:
+    description: Exact Abizor PyPI package version to install.
+    required: false
+    default: "0.1.9"
+  python-version:
+    description: Python version for actions/setup-python.
+    required: false
+    default: "3.12"
+  intent:
+    description: Human-readable run intent.
+    required: false
+    default: verify this pull request before merge
+  diff-base:
+    description: Explicit diff base. Defaults to origin/$GITHUB_BASE_REF.
+    required: false
+    default: ""
+  publish-check:
+    description: Create or update one Abizor GitHub Check projection.
+    required: false
+    default: "true"
+  upload-artifacts:
+    description: Upload generated Abizor run artifacts.
+    required: false
+    default: "true"
+  artifact-prefix:
+    description: Prefix for uploaded artifact names.
+    required: false
+    default: abizor
+
+outputs:
+  status:
+    description: Abizor artifact manifest status.
+    value: ${{ steps.collect.outputs.status }}
+  event-log:
+    description: Path to abizor-events.json.
+    value: ${{ steps.collect.outputs.event-log }}
+  manifest:
+    description: Path to abizor-artifacts.json.
+    value: ${{ steps.collect.outputs.manifest }}
+  change-record-json:
+    description: Path to abizor-change-record.json.
+    value: ${{ steps.collect.outputs.change-record-json }}
+  change-record-markdown:
+    description: Path to abizor-change-record.md.
+    value: ${{ steps.collect.outputs.change-record-markdown }}
+  summary:
+    description: Path to abizor-summary.md.
+    value: ${{ steps.collect.outputs.summary }}
+  comment-body:
+    description: Path to abizor-pr-comment.md.
+    value: ${{ steps.collect.outputs.comment-body }}
+  verify-record-output:
+    description: Output from local Abizor record verification.
+    value: ${{ steps.collect.outputs.verify-record-output }}
+  check-report:
+    description: Path to abizor-live-check.md when publish-check is true.
+    value: ${{ steps.collect.outputs.check-report }}
+  check-json:
+    description: Path to abizor-live-check.json when publish-check is true.
+    value: ${{ steps.collect.outputs.check-json }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate pull request context
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+          echo "::error::Abizor Check action requires a pull_request event."
+          exit 1
+        fi
+        if [ -z "${GITHUB_HEAD_REF:-}" ] || [ -z "${GITHUB_BASE_REF:-}" ]; then
+          echo "::error::GITHUB_HEAD_REF and GITHUB_BASE_REF are required."
+          exit 1
+        fi
+
+    - name: Check out PR head branch
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+        ref: ${{ github.head_ref }}
+
+    - name: Fetch PR base branch
+      shell: bash
+      run: git fetch origin "$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install Abizor
+      shell: bash
+      run: python3 -m pip install "abizor==${{ inputs.abizor-version }}"
+
+    - name: Run Abizor Check
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        VERIFICATION_COMMAND: ${{ inputs.verification-command }}
+        INTENT: ${{ inputs.intent }}
+        DIFF_BASE_INPUT: ${{ inputs.diff-base }}
+      run: |
+        set -euo pipefail
+        DIFF_BASE="$DIFF_BASE_INPUT"
+        if [ -z "$DIFF_BASE" ]; then
+          DIFF_BASE="origin/$GITHUB_BASE_REF"
+        fi
+        SUMMARY_FILE="$RUNNER_TEMP/abizor-summary.md"
+        abizor pr-check \
+          --event-log "$RUNNER_TEMP/abizor-events.json" \
+          --checkout-path "$GITHUB_WORKSPACE" \
+          --intent "$INTENT" \
+          --diff-base "$DIFF_BASE" \
+          --verification-command "$VERIFICATION_COMMAND" \
+          --github-command "gh" \
+          --summary-file "$SUMMARY_FILE" \
+          --comment-file "$RUNNER_TEMP/abizor-pr-comment.md" \
+          --change-record-json-file "$RUNNER_TEMP/abizor-change-record.json" \
+          --change-record-markdown-file "$RUNNER_TEMP/abizor-change-record.md" \
+          --manifest-file "$RUNNER_TEMP/abizor-artifacts.json"
+        cat "$SUMMARY_FILE" >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Verify Abizor record
+      id: verify
+      shell: bash
+      run: |
+        set -euo pipefail
+        verify_output="$(
+          abizor verify-record \
+            --event-log "$RUNNER_TEMP/abizor-events.json" \
+            --manifest "$RUNNER_TEMP/abizor-artifacts.json" \
+            --change-record-json "$RUNNER_TEMP/abizor-change-record.json" \
+            --change-record-markdown "$RUNNER_TEMP/abizor-change-record.md"
+        )"
+        printf '%s\n' "$verify_output"
+        {
+          printf 'verify-record-output<<EOF\n'
+          printf '%s\n' "$verify_output"
+          printf 'EOF\n'
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Build hosted webhook log projection
+      if: ${{ inputs.publish-check == 'true' }}
+      shell: bash
+      run: |
+        abizor actions-webhook-log \
+          --github-event-path "$GITHUB_EVENT_PATH" \
+          --delivery-id "actions-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+          --output "$RUNNER_TEMP/abizor-hosted-webhook-events.json"
+
+    - name: Publish live Abizor GitHub Check
+      if: ${{ inputs.publish-check == 'true' }}
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        abizor publish-check \
+          --event-log "$RUNNER_TEMP/abizor-events.json" \
+          --hosted-webhook-log "$RUNNER_TEMP/abizor-hosted-webhook-events.json" \
+          --receipt-store "$RUNNER_TEMP/abizor-check-receipts.json" \
+          --github-token-env GITHUB_TOKEN \
+          --source-commit "${PR_HEAD_SHA}" \
+          --report "$RUNNER_TEMP/abizor-live-check.md" \
+          --json "$RUNNER_TEMP/abizor-live-check.json"
+        cat "$RUNNER_TEMP/abizor-live-check.md" >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Generate redacted feedback export
+      if: ${{ always() }}
+      shell: bash
+      run: |
+        if [ -f "$RUNNER_TEMP/abizor-events.json" ] && \
+           [ -f "$RUNNER_TEMP/abizor-artifacts.json" ] && \
+           [ -f "$RUNNER_TEMP/abizor-change-record.json" ]; then
+          abizor feedback-export \
+            --event-log "$RUNNER_TEMP/abizor-events.json" \
+            --manifest "$RUNNER_TEMP/abizor-artifacts.json" \
+            --change-record-json "$RUNNER_TEMP/abizor-change-record.json" \
+            --output "$RUNNER_TEMP/abizor-feedback.md"
+        fi
+
+    - name: Set action outputs
+      id: collect
+      if: ${{ always() }}
+      shell: bash
+      env:
+        VERIFY_RECORD_OUTPUT: ${{ steps.verify.outputs.verify-record-output }}
+      run: |
+        set -euo pipefail
+        status=""
+        if [ -f "$RUNNER_TEMP/abizor-artifacts.json" ]; then
+          status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status", ""))' "$RUNNER_TEMP/abizor-artifacts.json")"
+        fi
+        {
+          printf 'status=%s\n' "$status"
+          printf 'event-log=%s\n' "$RUNNER_TEMP/abizor-events.json"
+          printf 'manifest=%s\n' "$RUNNER_TEMP/abizor-artifacts.json"
+          printf 'change-record-json=%s\n' "$RUNNER_TEMP/abizor-change-record.json"
+          printf 'change-record-markdown=%s\n' "$RUNNER_TEMP/abizor-change-record.md"
+          printf 'summary=%s\n' "$RUNNER_TEMP/abizor-summary.md"
+          printf 'comment-body=%s\n' "$RUNNER_TEMP/abizor-pr-comment.md"
+          printf 'check-report=%s\n' "$RUNNER_TEMP/abizor-live-check.md"
+          printf 'check-json=%s\n' "$RUNNER_TEMP/abizor-live-check.json"
+          printf 'verify-record-output<<EOF\n'
+          printf '%s\n' "$VERIFY_RECORD_OUTPUT"
+          printf 'EOF\n'
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Upload Abizor event log
+      if: ${{ always() && inputs.upload-artifacts == 'true' }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.artifact-prefix }}-events
+        path: ${{ runner.temp }}/abizor-events.json
+        if-no-files-found: ignore
+
+    - name: Upload Abizor summary
+      if: ${{ always() && inputs.upload-artifacts == 'true' }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.artifact-prefix }}-summary
+        path: ${{ runner.temp }}/abizor-summary.md
+        if-no-files-found: ignore
+
+    - name: Upload Abizor PR comment body
+      if: ${{ always() && inputs.upload-artifacts == 'true' }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.artifact-prefix }}-pr-comment-body
+        path: ${{ runner.temp }}/abizor-pr-comment.md
+        if-no-files-found: ignore
+
+    - name: Upload Abizor artifact manifest
+      if: ${{ always() && inputs.upload-artifacts == 'true' }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.artifact-prefix }}-artifacts
+        path: ${{ runner.temp }}/abizor-artifacts.json
+        if-no-files-found: ignore
+
+    - name: Upload Abizor Change Record
+      if: ${{ always() && inputs.upload-artifacts == 'true' }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.artifact-prefix }}-change-record
+        path: |
+          ${{ runner.temp }}/abizor-change-record.json
+          ${{ runner.temp }}/abizor-change-record.md
+        if-no-files-found: ignore
+
+    - name: Upload Abizor live Check
+      if: ${{ always() && inputs.upload-artifacts == 'true' && inputs.publish-check == 'true' }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.artifact-prefix }}-live-check
+        path: |
+          ${{ runner.temp }}/abizor-hosted-webhook-events.json
+          ${{ runner.temp }}/abizor-check-receipts.json
+          ${{ runner.temp }}/abizor-live-check.md
+          ${{ runner.temp }}/abizor-live-check.json
+        if-no-files-found: ignore
+
+    - name: Upload Abizor feedback export
+      if: ${{ always() && inputs.upload-artifacts == 'true' }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.artifact-prefix }}-feedback-export
+        path: ${{ runner.temp }}/abizor-feedback.md
+        if-no-files-found: ignore
