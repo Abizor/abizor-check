@@ -68,7 +68,7 @@ Required:
 
 Optional:
 
-- `abizor-version`: exact PyPI package version, default `0.1.12`.
+- `abizor-version`: exact PyPI package version, default `0.1.13`.
 - `python-version`: Python version for `actions/setup-python`, default `3.12`.
 - `intent`: run intent, default `verify this pull request before merge`.
 - `diff-base`: explicit diff base, default `origin/$GITHUB_BASE_REF`.
