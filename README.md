@@ -51,6 +51,10 @@ The verification command is executed without a shell by Abizor. Put compound
 shell logic such as install plus build plus test in a repository script, then
 call that script from `verification-command`.
 
+If Abizor blocks a change, the action still verifies the generated record,
+publishes the GitHub Check, uploads artifacts, and then returns the Abizor
+non-zero status.
+
 For production or private repositories that require an immutable action
 reference, pin a full commit SHA from a validated run instead of the moving
 `v1` major tag.
