@@ -86,10 +86,15 @@ Optional:
 - `summary`
 - `comment-body`
 - `verify-record-output`
+- `verify-record-report`
 - `check-report`
 - `check-json`
 
 Outputs are projections. Canonical truth remains the Abizor event log.
+
+When artifact upload is enabled, the action also uploads the local
+`verify-record` output as a separate artifact named
+`<artifact-prefix>-verify-record`.
 
 ## Boundary
 

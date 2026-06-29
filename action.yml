@@ -62,6 +62,9 @@ outputs:
   verify-record-output:
     description: Output from local Abizor record verification.
     value: ${{ steps.collect.outputs.verify-record-output }}
+  verify-record-report:
+    description: Path to abizor-verify-record.md.
+    value: ${{ steps.collect.outputs.verify-record-report }}
   check-report:
     description: Path to abizor-live-check.md when publish-check is true.
     value: ${{ steps.collect.outputs.check-report }}
@@ -144,19 +147,27 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        verify_output="$(
+        VERIFY_RECORD_FILE="$RUNNER_TEMP/abizor-verify-record.md"
+        set +e
+        {
+          echo "## Abizor verify-record"
           abizor verify-record \
             --event-log "$RUNNER_TEMP/abizor-events.json" \
             --manifest "$RUNNER_TEMP/abizor-artifacts.json" \
             --change-record-json "$RUNNER_TEMP/abizor-change-record.json" \
             --change-record-markdown "$RUNNER_TEMP/abizor-change-record.md"
-        )"
-        printf '%s\n' "$verify_output"
+        } > "$VERIFY_RECORD_FILE" 2>&1
+        verify_status="$?"
+        set -e
+        cat "$VERIFY_RECORD_FILE"
+        cat "$VERIFY_RECORD_FILE" >> "$GITHUB_STEP_SUMMARY"
+        verify_output="$(cat "$VERIFY_RECORD_FILE")"
         {
           printf 'verify-record-output<<EOF\n'
           printf '%s\n' "$verify_output"
           printf 'EOF\n'
         } >> "$GITHUB_OUTPUT"
+        exit "$verify_status"
 
     - name: Build hosted webhook log projection
       if: ${{ inputs.publish-check == 'true' }}
@@ -218,6 +229,7 @@ runs:
           printf 'change-record-markdown=%s\n' "$RUNNER_TEMP/abizor-change-record.md"
           printf 'summary=%s\n' "$RUNNER_TEMP/abizor-summary.md"
           printf 'comment-body=%s\n' "$RUNNER_TEMP/abizor-pr-comment.md"
+          printf 'verify-record-report=%s\n' "$RUNNER_TEMP/abizor-verify-record.md"
           printf 'check-report=%s\n' "$RUNNER_TEMP/abizor-live-check.md"
           printf 'check-json=%s\n' "$RUNNER_TEMP/abizor-live-check.json"
           printf 'verify-record-output<<EOF\n'
@@ -265,6 +277,14 @@ runs:
         path: |
           ${{ runner.temp }}/abizor-change-record.json
           ${{ runner.temp }}/abizor-change-record.md
+        if-no-files-found: ignore
+
+    - name: Upload Abizor verify-record output
+      if: ${{ always() && inputs.upload-artifacts == 'true' }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.artifact-prefix }}-verify-record
+        path: ${{ runner.temp }}/abizor-verify-record.md
         if-no-files-found: ignore
 
     - name: Upload Abizor live Check
